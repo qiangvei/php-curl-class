@@ -5,11 +5,11 @@ set -x
 cd "${SCRIPT_DIR}/../../.."
 project_dir="${PWD}"
 
-docker start "php55" ||
+docker start "php80" ||
     docker run \
         --detach \
         --interactive \
         --mount "type=bind,src=${project_dir},dst=/data,readonly=true" \
-        --name="php55" \
+        --name="php80" \
         --tty \
-        "php-curl-class/php55"
+        "php-curl-class/php80"

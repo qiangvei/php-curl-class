@@ -4,13 +4,14 @@ namespace Curl;
 
 use Curl\ArrayUtil;
 use Curl\Decoder;
+use Curl\Url;
 
 class Curl
 {
-    const VERSION = '8.9.0';
+    const VERSION = '9.1.0';
     const DEFAULT_TIMEOUT = 30;
 
-    public $curl;
+    public $curl = null;
     public $id = null;
 
     public $error = false;
@@ -29,7 +30,7 @@ class Curl
     public $requestHeaders = null;
     public $responseHeaders = null;
     public $rawResponseHeaders = '';
-    public $responseCookies = array();
+    public $responseCookies = [];
     public $response = null;
     public $rawResponse = null;
 
@@ -50,17 +51,17 @@ class Curl
     public $jsonDecoder = null;
     public $xmlDecoder = null;
 
-    private $cookies = array();
-    private $headers = array();
-    private $options = array();
+    private $cookies = [];
+    private $headers = [];
+    private $options = [];
 
-    private $jsonDecoderArgs = array();
+    private $jsonDecoderArgs = [];
     private $jsonPattern = '/^(?:application|text)\/(?:[a-z]+(?:[\.-][0-9a-z]+){0,}[\+\.]|x-)?json(?:-[a-z]+)?/i';
-    private $xmlDecoderArgs = array();
+    private $xmlDecoderArgs = [];
     private $xmlPattern = '~^(?:text/|application/(?:atom\+|rss\+|soap\+)?)xml~i';
     private $defaultDecoder = null;
 
-    public static $RFC2616 = array(
+    public static $RFC2616 = [
         // RFC 2616: "any CHAR except CTLs or separators".
         // CHAR           = <any US-ASCII character (octets 0 - 127)>
         // CTL            = <any US-ASCII control character
@@ -76,8 +77,8 @@ class Curl
         'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X',
         'Y', 'Z', '^', '_', '`', 'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l', 'm', 'n', 'o', 'p', 'q',
         'r', 's', 't', 'u', 'v', 'w', 'x', 'y', 'z', '|', '~',
-    );
-    public static $RFC6265 = array(
+    ];
+    public static $RFC6265 = [
         // RFC 6265: "US-ASCII characters excluding CTLs, whitespace DQUOTE, comma, semicolon, and backslash".
         // %x21
         '!',
@@ -91,14 +92,14 @@ class Curl
         // %x5D-7E
         ']', '^', '_', '`', 'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l', 'm', 'n', 'o', 'p', 'q', 'r',
         's', 't', 'u', 'v', 'w', 'x', 'y', 'z', '{', '|', '}', '~',
-    );
+    ];
 
-    private static $deferredProperties = array(
+    private static $deferredProperties = [
         'effectiveUrl',
         'rfc2616',
         'rfc6265',
         'totalTime',
-    );
+    ];
 
     /**
      * Construct
@@ -121,7 +122,7 @@ class Curl
      * Before Send
      *
      * @access public
-     * @param  $callback
+     * @param  $callback callable|null
      */
     public function beforeSend($callback)
     {
@@ -211,8 +212,9 @@ class Curl
      */
     public function close()
     {
-        if (is_resource($this->curl)) {
+        if ($this->curl !== null) {
             curl_close($this->curl);
+            $this->curl = null;
         }
         $this->options = null;
         $this->jsonDecoder = null;
@@ -226,7 +228,7 @@ class Curl
      * Complete
      *
      * @access public
-     * @param  $callback
+     * @param  $callback callable|null
      */
     public function complete($callback)
     {
@@ -237,7 +239,7 @@ class Curl
      * Progress
      *
      * @access public
-     * @param  $callback
+     * @param  $callback callable|null
      */
     public function progress($callback)
     {
@@ -255,7 +257,7 @@ class Curl
      *
      * @return mixed Returns the value provided by exec.
      */
-    public function delete($url, $query_parameters = array(), $data = array())
+    public function delete($url, $query_parameters = [], $data = [])
     {
         if (is_array($url)) {
             $data = $query_parameters;
@@ -268,7 +270,7 @@ class Curl
 
         // Avoid including a content-length header in DELETE requests unless there is a message body. The following
         // would include "Content-Length: 0" in the request header:
-        //   curl_setopt($ch, CURLOPT_POSTFIELDS, array());
+        //   curl_setopt($ch, CURLOPT_POSTFIELDS, []);
         // RFC 2616 4.3 Message Body:
         //   The presence of a message-body in a request is signaled by the
         //   inclusion of a Content-Length or Transfer-Encoding header field in
@@ -333,10 +335,110 @@ class Curl
     }
 
     /**
+     * Fast download
+     *
+     * @access private
+     * @param  $url
+     * @param  $filename
+     * @param  $connections
+     *
+     * @return boolean
+     */
+    public function _fastDownload($url, $filename, $connections = 4) {
+        // First we need to retrive the 'Content-Length' header.
+        // Use GET because not all hosts support HEAD requests.
+        $this->setOpts([
+            CURLOPT_CUSTOMREQUEST => 'GET',
+            CURLOPT_NOBODY        => true,
+            CURLOPT_HEADER        => true,
+            CURLOPT_ENCODING      => '',
+        ]);
+        $this->setUrl($url);
+        $this->exec();
+
+        $content_length = isset($this->responseHeaders['Content-Length']) ?
+            $this->responseHeaders['Content-Length'] : null;
+
+        // If content length header is missing, use the normal download.
+        if (!$content_length) {
+            return $this->download($url, $filename);
+        }
+
+        // Try to divide chunk_size equally.
+        $chunkSize = ceil($content_length / $connections);
+
+        // First bytes.
+        $offset = 0;
+        $nextChunk = $chunkSize;
+
+        // We need this later.
+        $file_parts = [];
+
+        $multi_curl = new MultiCurl();
+        $multi_curl->setConcurrency($connections);
+
+        $multi_curl->error(function ($instance) {
+            return false;
+        });
+
+        for ($i = 1; $i <= $connections; $i++) {
+            // If last chunk then no need to supply it.
+            // Range starts with 0, so subtract 1.
+            $nextChunk = $i === $connections ? '' : $nextChunk - 1;
+
+            // Create part file.
+            $fpath = "$filename.part$i";
+            if (is_file($fpath)) {
+                unlink($fpath);
+            }
+            $fp = fopen($fpath, 'w');
+
+            // Track all fileparts names; we need this later.
+            $file_parts[] = $fpath;
+
+            $curl = new Curl();
+            $curl->setOpt(CURLOPT_ENCODING, '');
+            $curl->setRange("$offset-$nextChunk");
+            $curl->setFile($fp);
+            $curl->disableTimeout(); // otherwise download may fail.
+            $curl->setUrl($url);
+
+            $curl->complete(function () use ($fp) {
+                fclose($fp);
+            });
+
+            $multi_curl->addCurl($curl);
+
+            if ($i != $connections) {
+                $offset = $nextChunk + 1; // Add 1 to match offset.
+                $nextChunk = $nextChunk + $chunkSize;
+            }
+        }
+
+        // let the magic begin.
+        $multi_curl->start();
+
+        // Concatenate chunks to single.
+        if (is_file($filename)) {
+            unlink($filename);
+        }
+        $mainfp = fopen($filename, 'w');
+        foreach ($file_parts as $part) {
+            $fp = fopen($part, 'r');
+            stream_copy_to_stream($fp, $mainfp);
+            fclose($fp);
+            unlink($part);
+        }
+        fclose($mainfp);
+
+        return true;
+    }
+
+    /**
      * Error
      *
      * @access public
-     * @param  $callback
+     * @param  $callback callable|null
      */
     public function error($callback)
     {
@@ -363,7 +465,7 @@ class Curl
         }
 
         if ($ch === null) {
-            $this->responseCookies = array();
+            $this->responseCookies = [];
             $this->call($this->beforeSendCallback);
             $this->rawResponse = curl_exec($this->curl);
             $this->curlErrorCode = curl_errno($this->curl);
@@ -378,7 +480,7 @@ class Curl
         $this->rawResponseHeaders = $this->headerCallbackData->rawResponseHeaders;
         $this->responseCookies = $this->headerCallbackData->responseCookies;
         $this->headerCallbackData->rawResponseHeaders = '';
-        $this->headerCallbackData->responseCookies = array();
+        $this->headerCallbackData->responseCookies = [];
 
         // Include additional error code information in error message when possible.
         if ($this->curlError && function_exists('curl_strerror')) {
@@ -389,7 +491,7 @@ class Curl
         }
 
         $this->httpStatusCode = $this->getInfo(CURLINFO_HTTP_CODE);
-        $this->httpError = in_array(floor($this->httpStatusCode / 100), array(4, 5));
+        $this->httpError = in_array(floor($this->httpStatusCode / 100), [4, 5]);
         $this->error = $this->curlError || $this->httpError;
         $this->errorCode = $this->error ? ($this->curlError ? $this->curlErrorCode : $this->httpStatusCode) : 0;
 
@@ -458,7 +560,7 @@ class Curl
      *
      * @return mixed Returns the value provided by exec.
      */
-    public function get($url, $data = array())
+    public function get($url, $data = [])
     {
         if (is_array($url)) {
             $data = $url;
@@ -480,7 +582,7 @@ class Curl
      */
     public function getInfo($opt = null)
     {
-        $args = array();
+        $args = [];
         $args[] = $this->curl;
 
         if (func_num_args()) {
@@ -512,7 +614,7 @@ class Curl
      *
      * @return mixed Returns the value provided by exec.
      */
-    public function head($url, $data = array())
+    public function head($url, $data = [])
     {
         if (is_array($url)) {
             $data = $url;
@@ -533,7 +635,7 @@ class Curl
      *
      * @return mixed Returns the value provided by exec.
      */
-    public function options($url, $data = array())
+    public function options($url, $data = [])
     {
         if (is_array($url)) {
             $data = $url;
@@ -553,7 +655,7 @@ class Curl
      *
      * @return mixed Returns the value provided by exec.
      */
-    public function patch($url, $data = array())
+    public function patch($url, $data = [])
     {
         if (is_array($url)) {
             $data = $url;
@@ -585,9 +687,9 @@ class Curl
      *       - In order to force a 303 redirection to be performed using the same method, the
      *         underlying cURL object must be set in a special state (the CURLOPT_CURSTOMREQUEST
      *         option must be set to the method to use after the redirection). Due to a limitation
-     *         of the cURL extension of PHP < 5.5.11 ([2], [3]) and of HHVM, it is not possible
-     *         to reset this option. Using these PHP engines, it is therefore impossible to
-     *         restore this behavior on an existing php-curl-class Curl object.
+     *         of the cURL extension of PHP < 5.5.11 ([2], [3]), it is not possible to reset this
+     *         option. Using these PHP engines, it is therefore impossible to restore this behavior
+     *         on an existing php-curl-class Curl object.
      *
      * @return mixed Returns the value provided by exec.
      *
@@ -609,17 +711,7 @@ class Curl
             $this->setOpt(CURLOPT_CUSTOMREQUEST, 'POST');
         } else {
             if (isset($this->options[CURLOPT_CUSTOMREQUEST])) {
-                if ((version_compare(PHP_VERSION, '5.5.11') < 0) || defined('HHVM_VERSION')) {
-                    trigger_error(
-                        'Due to technical limitations of PHP <= 5.5.11 and HHVM, it is not possible to '
-                        . 'perform a post-redirect-get request using a php-curl-class Curl object that '
-                        . 'has already been used to perform other types of requests. Either use a new '
-                        . 'php-curl-class Curl object or upgrade your PHP engine.',
-                        E_USER_ERROR
-                    );
-                } else {
-                    $this->setOpt(CURLOPT_CUSTOMREQUEST, null);
-                }
+                $this->setOpt(CURLOPT_CUSTOMREQUEST, null);
             }
         }
 
@@ -637,7 +729,7 @@ class Curl
      *
      * @return mixed Returns the value provided by exec.
      */
-    public function put($url, $data = array())
+    public function put($url, $data = [])
     {
         if (is_array($url)) {
             $data = $url;
@@ -666,7 +758,7 @@ class Curl
      *
      * @return mixed Returns the value provided by exec.
      */
-    public function search($url, $data = array())
+    public function search($url, $data = [])
     {
         if (is_array($url)) {
             $data = $url;
@@ -773,20 +865,10 @@ class Curl
      */
     public function setMaxFilesize($bytes)
     {
-        // Make compatible with PHP version both before and after 5.5.0. PHP 5.5.0 added the cURL resource as the first
-        // argument to the CURLOPT_PROGRESSFUNCTION callback.
-        $gte_v550 = version_compare(PHP_VERSION, '5.5.0') >= 0;
-        if ($gte_v550) {
-            $callback = function ($resource, $download_size, $downloaded, $upload_size, $uploaded) use ($bytes) {
-                // Abort the transfer when $downloaded bytes exceeds maximum $bytes by returning a non-zero value.
-                return $downloaded > $bytes ? 1 : 0;
-            };
-        } else {
-            $callback = function ($download_size, $downloaded, $upload_size, $uploaded) use ($bytes) {
-                return $downloaded > $bytes ? 1 : 0;
-            };
-        }
-
+        $callback = function ($resource, $download_size, $downloaded, $upload_size, $uploaded) use ($bytes) {
+            // Abort the transfer when $downloaded bytes exceeds maximum $bytes by returning a non-zero value.
+            return $downloaded > $bytes ? 1 : 0;
+        };
         $this->progress($callback);
     }
 
@@ -948,7 +1030,7 @@ class Curl
     public function setHeader($key, $value)
     {
         $this->headers[$key] = $value;
-        $headers = array();
+        $headers = [];
         foreach ($this->headers as $key => $value) {
             $headers[] = $key . ': ' . $value;
         }
@@ -980,7 +1062,7 @@ class Curl
             }
         }
 
-        $headers = array();
+        $headers = [];
         foreach ($this->headers as $key => $value) {
             $headers[] = $key . ': ' . $value;
         }
@@ -998,7 +1080,7 @@ class Curl
     {
         if ($mixed === false || is_callable($mixed)) {
             $this->jsonDecoder = $mixed;
-            $this->jsonDecoderArgs = array();
+            $this->jsonDecoderArgs = [];
         }
     }
 
@@ -1012,7 +1094,7 @@ class Curl
     {
         if ($mixed === false || is_callable($mixed)) {
             $this->xmlDecoder = $mixed;
-            $this->xmlDecoderArgs = array();
+            $this->xmlDecoderArgs = [];
         }
     }
 
@@ -1027,9 +1109,9 @@ class Curl
      */
     public function setOpt($option, $value)
     {
-        $required_options = array(
+        $required_options = [
             CURLOPT_RETURNTRANSFER => 'CURLOPT_RETURNTRANSFER',
-        );
+        ];
 
         if (in_array($option, array_keys($required_options), true) && $value !== true) {
             trigger_error($required_options[$option] . ' is a required option', E_USER_WARNING);
@@ -1222,7 +1304,7 @@ class Curl
      */
     public function setUrl($url, $mixed_data = '')
     {
-        $built_url = $this->buildUrl($url, $mixed_data);
+        $built_url = Url::buildUrl($url, $mixed_data);
 
         if ($this->url === null) {
             $this->url = (string)new Url($built_url);
@@ -1286,7 +1368,7 @@ class Curl
      * Success
      *
      * @access public
-     * @param  $callback
+     * @param  $callback callable|null
      */
     public function success($callback)
     {
@@ -1304,7 +1386,7 @@ class Curl
     public function unsetHeader($key)
     {
         unset($this->headers[$key]);
-        $headers = array();
+        $headers = [];
         foreach ($this->headers as $key => $value) {
             $headers[] = $key . ': ' . $value;
         }
@@ -1357,7 +1439,7 @@ class Curl
      */
     public function reset()
     {
-        if (function_exists('curl_reset') && is_resource($this->curl)) {
+        if (function_exists('curl_reset') && $this->curl !== null) {
             curl_reset($this->curl);
         } else {
             $this->curl = curl_init();
@@ -1539,7 +1621,7 @@ class Curl
     public function __get($name)
     {
         $return = null;
-        if (in_array($name, self::$deferredProperties) && is_callable(array($this, $getter = '__get_' . $name))) {
+        if (in_array($name, self::$deferredProperties) && is_callable([$this, $getter = '__get_' . $name])) {
             $return = $this->$name = $this->$getter();
         }
         return $return;
@@ -1597,29 +1679,6 @@ class Curl
         $this->setOpt(CURLOPT_COOKIE, implode('; ', array_map(function ($k, $v) {
             return $k . '=' . $v;
         }, array_keys($this->cookies), array_values($this->cookies))));
-    }
-
-    /**
-     * Build Url
-     *
-     * @access private
-     * @param  $url
-     * @param  $mixed_data
-     *
-     * @return string
-     */
-    private function buildUrl($url, $mixed_data = '')
-    {
-        $query_string = '';
-        if (!empty($mixed_data)) {
-            $query_mark = strpos($url, '?') > 0 ? '&' : '?';
-            if (is_string($mixed_data)) {
-                $query_string .= $query_mark . $mixed_data;
-            } elseif (is_array($mixed_data)) {
-                $query_string .= $query_mark . http_build_query($mixed_data, '', '&');
-            }
-        }
-        return $url . $query_string;
     }
 
     /**
@@ -1687,7 +1746,7 @@ class Curl
             }
         }
 
-        return array(isset($raw_headers['0']) ? $raw_headers['0'] : '', $http_headers);
+        return [isset($raw_headers['0']) ? $raw_headers['0'] : '', $http_headers];
     }
 
     /**
@@ -1789,7 +1848,7 @@ class Curl
      */
     private function setEncodedCookie($key, $value)
     {
-        $name_chars = array();
+        $name_chars = [];
         foreach (str_split($key) as $name_char) {
             if (isset($this->rfc2616[$name_char])) {
                 $name_chars[] = $name_char;
@@ -1798,7 +1857,7 @@ class Curl
             }
         }
 
-        $value_chars = array();
+        $value_chars = [];
         foreach (str_split($value) as $value_char) {
             if (isset($this->rfc6265[$value_char])) {
                 $value_chars[] = $value_char;
@@ -1826,13 +1885,16 @@ class Curl
         // Create a placeholder to temporarily store the header callback data.
         $header_callback_data = new \stdClass();
         $header_callback_data->rawResponseHeaders = '';
-        $header_callback_data->responseCookies = array();
+        $header_callback_data->responseCookies = [];
         $this->headerCallbackData = $header_callback_data;
         $this->setOpt(CURLOPT_HEADERFUNCTION, createHeaderCallback($header_callback_data));
 
         $this->setOpt(CURLOPT_RETURNTRANSFER, true);
         $this->headers = new CaseInsensitiveArray();
-        $this->setUrl($base_url);
+
+        if ($base_url !== null) {
+            $this->setUrl($base_url);
+        }
     }
 }
 

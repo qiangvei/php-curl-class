@@ -3,7 +3,7 @@ command=$(cat <<-END
 mkdir --parents "/tmp/php-curl-class" &&
 rsync --delete --exclude=".git" --exclude="vendor" --exclude="composer.lock" --links --recursive "/data/" "/tmp/php-curl-class/" &&
 cd "/tmp/php-curl-class" &&
-export TRAVIS_PHP_VERSION="5.6" &&
+export CI_PHP_VERSION="8.0" &&
 (
     [ ! -f "/tmp/.composer_updated" ] &&
     composer --no-interaction update &&
@@ -15,4 +15,4 @@ bash "tests/script.sh"
 END
 )
 set -x
-docker exec --tty "php56" sh -c "${command}"
+docker exec --tty "php80" sh -c "${command}"

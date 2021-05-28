@@ -3,15 +3,21 @@
 namespace Curl;
 
 use Curl\ArrayUtil;
+use Curl\Url;
 
 class MultiCurl
 {
     public $baseUrl = null;
-    public $multiCurl;
+    public $multiCurl = null;
 
-    private $curls = array();
-    private $activeCurls = array();
+    public $startTime = null;
+    public $stopTime = null;
+
+    private $curls = [];
+    private $activeCurls = [];
     private $isStarted = false;
+    private $currentStartTime = null;
+    private $currentRequestCount = 0;
     private $concurrency = 25;
     private $nextCurlId = 0;
 
@@ -22,8 +28,6 @@ class MultiCurl
     private $interval = null;
     private $intervalSeconds = null;
     private $unit = null;
-    private $currentStartTime = null;
-    private $currentRequestCount = 0;
 
     private $beforeSendCallback = null;
     private $successCallback = null;
@@ -32,9 +36,10 @@ class MultiCurl
 
     private $retry = null;
 
-    private $cookies = array();
-    private $headers = array();
-    private $options = array();
+    private $cookies = [];
+    private $headers = [];
+    private $options = [];
+    private $instanceSpecificOptions = [];
     private $proxies = null;
 
     private $jsonDecoder = null;
@@ -50,7 +55,10 @@ class MultiCurl
     {
         $this->multiCurl = curl_multi_init();
         $this->headers = new CaseInsensitiveArray();
-        $this->setUrl($base_url);
+
+        if ($base_url !== null) {
+            $this->setUrl($base_url);
+        }
     }
 
     /**
@@ -63,15 +71,17 @@ class MultiCurl
      *
      * @return object
      */
-    public function addDelete($url, $query_parameters = array(), $data = array())
+    public function addDelete($url, $query_parameters = [], $data = [])
     {
         if (is_array($url)) {
             $data = $query_parameters;
             $query_parameters = $url;
             $url = $this->baseUrl;
         }
-        $curl = new Curl();
+
+        $curl = new Curl($this->baseUrl);
         $this->queueHandle($curl);
+        $this->setUrl($url, $query_parameters);
         $curl->setUrl($url, $query_parameters);
         $curl->setOpt(CURLOPT_CUSTOMREQUEST, 'DELETE');
         $curl->setOpt(CURLOPT_POSTFIELDS, $curl->buildPostData($data));
@@ -89,8 +99,9 @@ class MultiCurl
      */
     public function addDownload($url, $mixed_filename)
     {
-        $curl = new Curl();
+        $curl = new Curl($this->baseUrl);
         $this->queueHandle($curl);
+        $this->setUrl($url);
         $curl->setUrl($url);
 
         // Use tmpfile() or php://temp to avoid "Too many open files" error.
@@ -147,14 +158,16 @@ class MultiCurl
      *
      * @return object
      */
-    public function addGet($url, $data = array())
+    public function addGet($url, $data = [])
     {
         if (is_array($url)) {
             $data = $url;
             $url = $this->baseUrl;
         }
-        $curl = new Curl();
+
+        $curl = new Curl($this->baseUrl);
         $this->queueHandle($curl);
+        $this->setUrl($url, $data);
         $curl->setUrl($url, $data);
         $curl->setOpt(CURLOPT_CUSTOMREQUEST, 'GET');
         $curl->setOpt(CURLOPT_HTTPGET, true);
@@ -170,14 +183,16 @@ class MultiCurl
      *
      * @return object
      */
-    public function addHead($url, $data = array())
+    public function addHead($url, $data = [])
     {
         if (is_array($url)) {
             $data = $url;
             $url = $this->baseUrl;
         }
-        $curl = new Curl();
+
+        $curl = new Curl($this->baseUrl);
         $this->queueHandle($curl);
+        $this->setUrl($url, $data);
         $curl->setUrl($url, $data);
         $curl->setOpt(CURLOPT_CUSTOMREQUEST, 'HEAD');
         $curl->setOpt(CURLOPT_NOBODY, true);
@@ -193,14 +208,16 @@ class MultiCurl
      *
      * @return object
      */
-    public function addOptions($url, $data = array())
+    public function addOptions($url, $data = [])
     {
         if (is_array($url)) {
             $data = $url;
             $url = $this->baseUrl;
         }
-        $curl = new Curl();
+
+        $curl = new Curl($this->baseUrl);
         $this->queueHandle($curl);
+        $this->setUrl($url, $data);
         $curl->setUrl($url, $data);
         $curl->removeHeader('Content-Length');
         $curl->setOpt(CURLOPT_CUSTOMREQUEST, 'OPTIONS');
@@ -216,20 +233,21 @@ class MultiCurl
      *
      * @return object
      */
-    public function addPatch($url, $data = array())
+    public function addPatch($url, $data = [])
     {
         if (is_array($url)) {
             $data = $url;
             $url = $this->baseUrl;
         }
 
-        $curl = new Curl();
+        $curl = new Curl($this->baseUrl);
 
         if (is_array($data) && empty($data)) {
             $curl->removeHeader('Content-Length');
         }
 
         $this->queueHandle($curl);
+        $this->setUrl($url, $data);
         $curl->setUrl($url);
         $curl->setOpt(CURLOPT_CUSTOMREQUEST, 'PATCH');
         $curl->setOpt(CURLOPT_POSTFIELDS, $curl->buildPostData($data));
@@ -256,8 +274,9 @@ class MultiCurl
             $url = $this->baseUrl;
         }
 
-        $curl = new Curl();
+        $curl = new Curl($this->baseUrl);
         $this->queueHandle($curl);
+        $this->setUrl($url, $data);
 
         if (is_array($data) && empty($data)) {
             $curl->removeHeader('Content-Length');
@@ -287,14 +306,16 @@ class MultiCurl
      *
      * @return object
      */
-    public function addPut($url, $data = array())
+    public function addPut($url, $data = [])
     {
         if (is_array($url)) {
             $data = $url;
             $url = $this->baseUrl;
         }
-        $curl = new Curl();
+
+        $curl = new Curl($this->baseUrl);
         $this->queueHandle($curl);
+        $this->setUrl($url, $data);
         $curl->setUrl($url);
         $curl->setOpt(CURLOPT_CUSTOMREQUEST, 'PUT');
         $put_data = $curl->buildPostData($data);
@@ -314,14 +335,16 @@ class MultiCurl
      *
      * @return object
      */
-    public function addSearch($url, $data = array())
+    public function addSearch($url, $data = [])
     {
         if (is_array($url)) {
             $data = $url;
             $url = $this->baseUrl;
         }
-        $curl = new Curl();
+
+        $curl = new Curl($this->baseUrl);
         $this->queueHandle($curl);
+        $this->setUrl($url, $data);
         $curl->setUrl($url);
         $curl->setOpt(CURLOPT_CUSTOMREQUEST, 'SEARCH');
         $put_data = $curl->buildPostData($data);
@@ -352,7 +375,7 @@ class MultiCurl
      * Before Send
      *
      * @access public
-     * @param  $callback
+     * @param  $callback callable|null
      */
     public function beforeSend($callback)
     {
@@ -370,8 +393,9 @@ class MultiCurl
             $curl->close();
         }
 
-        if (is_resource($this->multiCurl)) {
+        if ($this->multiCurl !== null) {
             curl_multi_close($this->multiCurl);
+            $this->multiCurl = null;
         }
     }
 
@@ -379,7 +403,7 @@ class MultiCurl
      * Complete
      *
      * @access public
-     * @param  $callback
+     * @param  $callback callable|null
      */
     public function complete($callback)
     {
@@ -390,7 +414,7 @@ class MultiCurl
      * Error
      *
      * @access public
-     * @param  $callback
+     * @param  $callback callable|null
      */
     public function error($callback)
     {
@@ -709,6 +733,18 @@ class MultiCurl
     public function setOpt($option, $value)
     {
         $this->options[$option] = $value;
+
+        // Make changing the url an instance-specific option. Set the value of
+        // existing instances when they have not already been set to avoid
+        // unexpectedly changing the request url after is has been specified.
+        if ($option === CURLOPT_URL) {
+            foreach ($this->curls as $curl_id => $curl) {
+                if (!isset($this->instanceSpecificOptions[$curl_id][$option]) ||
+                    $this->instanceSpecificOptions[$curl_id][$option] === null) {
+                    $this->instanceSpecificOptions[$curl_id][$option] = $value;
+                }
+            }
+        }
     }
 
     /**
@@ -854,10 +890,19 @@ class MultiCurl
      *
      * @access public
      * @param  $url
+     * @param  $mixed_data
      */
-    public function setUrl($url)
+    public function setUrl($url, $mixed_data = '')
     {
-        $this->baseUrl = $url;
+        $built_url = Url::buildUrl($url, $mixed_data);
+
+        if ($this->baseUrl === null) {
+            $this->baseUrl = (string)new Url($built_url);
+        } else {
+            $this->baseUrl = (string)new Url($this->baseUrl, $built_url);
+        }
+
+        $this->setOpt(CURLOPT_URL, $this->baseUrl);
     }
 
     /**
@@ -898,6 +943,7 @@ class MultiCurl
         }
 
         $this->isStarted = true;
+        $this->startTime = microtime(true);
         $this->currentStartTime = microtime(true);
         $this->currentRequestCount = 0;
 
@@ -915,7 +961,11 @@ class MultiCurl
 
             // Wait for activity on any curl_multi connection when curl_multi_select (libcurl) fails to correctly block.
             // https://bugs.php.net/bug.php?id=63411
-            if (curl_multi_select($this->multiCurl) === -1) {
+            //
+            // Also, use a shorter curl_multi_select() timeout instead the default of one second. This allows pending
+            // requests to have more accurate start times. Without a shorter timeout, it can be nearly a full second
+            // before available request quota is rechecked and pending requests can be initialized.
+            if (curl_multi_select($this->multiCurl, 0.2) === -1) {
                 usleep(100000);
             }
 
@@ -962,13 +1012,14 @@ class MultiCurl
         } while ($active || count($this->activeCurls) || count($this->curls));
 
         $this->isStarted = false;
+        $this->stopTime = microtime(true);
     }
 
     /**
      * Success
      *
      * @access public
-     * @param  $callback
+     * @param  $callback callable|null
      */
     public function success($callback)
     {
@@ -1098,7 +1149,14 @@ class MultiCurl
             $curl->setXmlDecoder($this->xmlDecoder);
         }
 
+        // Pass options set on the MultiCurl instance to the Curl instance.
         $curl->setOpts($this->options);
+
+        // Set instance-specific options on the Curl instance when present.
+        if (isset($this->instanceSpecificOptions[$curl->id])) {
+            $curl->setOpts($this->instanceSpecificOptions[$curl->id]);
+        }
+
         $curl->setRetry($this->retry);
         $curl->setCookies($this->cookies);
 
@@ -1131,13 +1189,14 @@ class MultiCurl
         if ($this->rateLimitEnabled) {
             // Determine if the limit of requests per interval has been reached.
             if ($this->currentRequestCount >= $this->maxRequests) {
-                $elapsed_seconds = microtime(true) - $this->currentStartTime;
+                $micro_time = microtime(true);
+                $elapsed_seconds = $micro_time - $this->currentStartTime;
                 if ($elapsed_seconds <= $this->intervalSeconds) {
                     $this->rateLimitReached = true;
                     return false;
                 } elseif ($this->rateLimitReached) {
                     $this->rateLimitReached = false;
-                    $this->currentStartTime = microtime(true);
+                    $this->currentStartTime = $micro_time;
                     $this->currentRequestCount = 0;
                 }
             }
@@ -1163,7 +1222,15 @@ class MultiCurl
         // Avoid using time_sleep_until() as it appears to be less precise and not sleep long enough.
         usleep($sleep_seconds * 1000000);
 
+        // Ensure that enough time has passed as usleep() may not have waited long enough.
         $this->currentStartTime = microtime(true);
+        if ($this->currentStartTime < $sleep_until) {
+            do {
+                usleep(1000000 / 4);
+                $this->currentStartTime = microtime(true);
+            } while ($this->currentStartTime < $sleep_until);
+        }
+
         $this->currentRequestCount = 0;
     }
 }

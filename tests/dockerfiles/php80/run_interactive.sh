@@ -8,7 +8,7 @@ project_dir="${PWD}"
 docker run \
     --interactive \
     --mount "type=bind,src=${project_dir},dst=/data,readonly=true" \
-    --name="php54" \
+    --name="php80" \
     --rm \
     --tty \
-    "php-curl-class/php54" /bin/bash
+    "php-curl-class/php80" /bin/bash
